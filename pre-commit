@@ -1,0 +1,199 @@
+#!/bin/bash
+# PHP CodeSniffer pre-commit hook for Git
+
+# Define a function to exit which can reset $IFS.
+clean_exit(){
+  IFS=$IFSBACK
+  exit 1
+}
+
+echo
+echo "**************************************************************************"
+echo "*                                                                        *"
+echo "*   CODING STYLE GIT PRE-COMMIT HOOK                                     *"
+echo "*                                                                        *"
+echo "*   In order to commit your changes, it must pass the following filters: *"
+echo "*                                                                        *"
+echo "*   I. Syntax checking using PHP Linter                                  *"
+echo "*   II. Coding standards checking using PHP Code Sniffer                 *"
+echo "*   III. Blacklisted functions checking/validation.                      *"
+echo "*                                                                        *"
+echo "**************************************************************************"
+echo
+
+
+# Get hook directory
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Blacklist PHP development functions that should be used in development only.
+blacklist[1]=" var_dump("
+blacklist[2]=" print_r("
+blacklist[3]=" debug_backtrace("
+blacklist[4]=" die("
+
+# Blacklist Javascript functions that should be used in development only.
+blacklist[7]=" console.log("
+blacklist[8]=" alert("
+
+# Blacklist code conflicts resulting from Git merge.
+blacklist[5]="<<<<<<<"
+blacklist[6]=">>>>>>>"
+
+# Get the total number of blacklisted functions.
+element_count=${#blacklist[@]}
+let "element_count += 1"
+
+ROOT_DIR="$(pwd)/"
+
+# Exclude extensions we know should not be checked.
+filters_exclude[0]='\.png$'
+filters_exclude[1]='\.gif$'
+filters_exclude[2]='\.jpg$'
+filters_exclude[3]='\.ico$'
+filters_exclude[4]='\.patch$'
+filters_exclude[5]='\.ad$'
+filters_exclude[6]='\.htaccess$'
+filters_exclude[7]='\.sh$'
+filters_exclude[8]='\.ttf$'
+filters_exclude[9]='\.woff$'
+filters_exclude[10]='\.eot$'
+filters_exclude[11]='\.svg$'
+filters_exclude[12]='\.xml$'
+
+# Join filters_exclude array into a single string for grep -v.
+# We use egrep for the exclude since it combines better with -v.
+sep="|"
+egrep_exclude=$(printf "${sep}%s" "${filters_exclude[@]}")
+# Remove the separator from the start of the string
+egrep_exclude=${egrep_exclude:${#sep}}
+egrep_exclude=".*\($egrep_exclude\)"
+
+LIST=$( git diff --name-only --cached --diff-filter=ACM | egrep -v "$egrep_exclude" )
+
+i=1
+
+# This counter is used by the Code Sniffer for tracking errors.
+sniffer_error_count=0
+
+ERRORS_BUFFER=""
+
+# PHP syntax-error free code
+NO_SYNTAX_ERROR=0
+
+# PHP syntax error code
+SYNTAX_ERROR=255
+
+# Code Sniffer error code
+PHPCS_FAILED=1
+
+# Code Sniffer success code
+PHPCS_PASSED=0
+
+php () { docker run -t --rm --net host -v `pwd`:/wd -w /wd krystalcode/php5-cli $@; }
+phpcs () { docker run -t --rm --net host -v `pwd`:/wd -w /wd krystalcode/phpcs $@; }
+
+for file in $LIST
+do
+
+  IS_PHP_FILE=$(echo "$file" | egrep "\.php$")
+
+  ##################################
+  # Check for syntax error.
+  ##################################
+
+  if [ "$IS_PHP_FILE" != "" ]; then
+    echo "Validating $file ... "
+
+    php -l $file > /dev/null
+    SYNTAX_CODE=$?
+
+    if [ "$SYNTAX_CODE" == "$SYNTAX_ERROR" ]; then
+      echo
+      echo "You have syntax errors in your code. Please fix them before trying to commit your changes again."
+      echo
+      clean_exit
+
+    elif [ "$SYNTAX_CODE" != "$NO_SYNTAX_ERROR" ]; then
+      echo
+      echo "Invalid operation."
+      echo
+      clean_exit
+    fi
+  fi
+
+  #################################
+  # Run PHP Code Sniffer.
+  #################################
+
+  if [ "$IS_PHP_FILE" != "" ]; then
+
+    # Get the PHP Codesniffer bin path.
+    PHPCS_BIN='phpcs'
+
+    # Default PHP error code.
+    PHP_CODE=0
+
+    # Run the PHP Codesniffer validation.
+    $PHPCS_BIN --standard=PSR2 $file >&2
+
+    # The result code of the PHPCS operation.
+    PHPCS_CODE=$?
+
+    if [ "$PHPCS_CODE" == "$PHPCS_FAILED" ]; then
+      let "sniffer_error_count += 1"
+
+    elif [ "$PHPCS_CODE" != "$PHPCS_PASSED" ]; then
+      echo
+      echo "Invalid operation."
+      echo
+      clean_exit
+    fi
+  fi
+
+  #################################
+  # Check for debugging functions
+  #################################
+
+  # Define allowed/possible file extensions that might contain debugging functions.
+  BLACKLIST_CANDIDATE=$(echo "$file" | egrep "\.php$|\.js$|\.html$")
+
+  if [ "$BLACKLIST_CANDIDATE" != "" ]; then
+    index=1
+    while [ "$index" -lt "$element_count" ]
+    do
+        # Find the blacklisted functions in the current file.
+        ERRORS=$(grep "${blacklist[$index]}" $ROOT_DIR$file >&1)
+        if [ "$ERRORS" != "" ]; then
+            if [ "$ERRORS_BUFFER" != "" ]; then
+                ERRORS_BUFFER+="\n${blacklist[$index]} found in file: $file "
+
+            else
+                ERRORS_BUFFER="\n${blacklist[$index]} found in file: $file "
+            fi
+        fi
+
+        let "index += 1"
+    done
+  fi
+
+done
+
+if [ "$sniffer_error_count" -gt "0" ]; then
+    echo "$sniffer_error_count files failed to pass the PHP Code Sniffer PSR-2 validation."
+    echo "Please fix them before trying to commit your changes again."
+    echo
+    #clean_exit
+fi
+
+if [ "$ERRORS_BUFFER" != "" ]; then
+    echo
+    echo "The following blacklisted functions were found in the files you are trying to commit. "
+    echo "Please remove them before trying to commit your changes again."
+    echo -e $ERRORS_BUFFER
+    echo
+    echo "Your changes cannot be committed - please fix the generated errors first."
+    echo
+    clean_exit
+fi
+
+echo "Your changes have passed all the filters, your code has now been committed."
